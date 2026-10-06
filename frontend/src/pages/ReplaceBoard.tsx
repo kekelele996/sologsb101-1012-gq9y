@@ -34,6 +34,7 @@ import { ROUTES } from '@/router';
 import { useAppDispatch, useAppSelector } from '@/stores/store';
 import { selectArrays, selectStations } from '@/stores/arraySlice';
 import { selectInstruments } from '@/stores/instrumentSlice';
+import { selectActiveInstalls } from '@/stores/opsSlice';
 import {
   createReplace,
   patchReplaceFilter,
@@ -86,6 +87,7 @@ export default function ReplaceBoard() {
   const { message } = AntdApp.useApp();
 
   const instruments = useAppSelector(selectInstruments);
+  const activeInstalls = useAppSelector(selectActiveInstalls);
   const stations = useAppSelector(selectStations);
   const arrays = useAppSelector(selectArrays);
   const calibrations = useAppSelector(selectCalibrations);
@@ -104,6 +106,10 @@ export default function ReplaceBoard() {
 
   /** 仪器评定行：结合标定结论与更换记录 */
   const rows = useMemo<AssessmentRow[]>(() => {
+    // 安装位上在用的序列号：拆下来的旧机即使仪器档案写「已停用」也不再进超期名单
+    const inSlotSerials = new Set(
+      activeInstalls.map((row) => row.serialNo.trim()).filter((serial) => serial.length > 0)
+    );
     return instruments
       .map((instrument) => {
         const station = stations.find((row) => row.id === instrument.stationId);
@@ -113,7 +119,9 @@ export default function ReplaceBoard() {
           .sort((a, b) => b.date.localeCompare(a.date));
         const latest = own[0];
         const lastDate = latest ? latest.date : instrument.installDate;
-        const dueInDays = daysUntilDue(lastDate, instrument.installDate);
+        const dueInDaysRaw = daysUntilDue(lastDate, instrument.installDate);
+        const removed = instrument.state === '已停用' && !inSlotSerials.has(instrument.serialNo.trim());
+        const dueInDays = removed ? Number.POSITIVE_INFINITY : dueInDaysRaw;
         const replace =
           replaces
             .filter((row) => row.instrumentId === instrument.id)
@@ -125,7 +133,7 @@ export default function ReplaceBoard() {
           arrayName: array?.name ?? '未知台阵',
           lastDate,
           dueInDays,
-          overdue: dueInDays < 0,
+          overdue: !removed && dueInDaysRaw < 0,
           lastVerdict: latest ? latest.responseVerdict : '待判定',
           calibrationCount: own.length,
           replace,
@@ -145,7 +153,7 @@ export default function ReplaceBoard() {
         return true;
       })
       .sort((a, b) => a.dueInDays - b.dueInDays);
-  }, [arrays, calibrations, filter, instruments, replaces, stations]);
+  }, [activeInstalls, arrays, calibrations, filter, instruments, replaces, stations]);
 
   const totals = useMemo(() => {
     const overdue = rows.filter((row) => row.overdue).length;
@@ -383,11 +391,16 @@ export default function ReplaceBoard() {
             {
               title: '标定提醒',
               width: 160,
-              render: (_: unknown, row: AssessmentRow) => (
-                <span className={row.overdue ? 'gb-danger gb-mono' : 'gb-mono'}>
-                  {row.overdue ? `超期 ${Math.abs(row.dueInDays)} 天` : `剩余 ${row.dueInDays} 天`}
-                </span>
-              ),
+              render: (_: unknown, row: AssessmentRow) => {
+                if (row.instrument.state === '已停用' && !Number.isFinite(row.dueInDays)) {
+                  return <span className="gb-hint">已拆下 · 不计超期</span>;
+                }
+                return (
+                  <span className={row.overdue ? 'gb-danger gb-mono' : 'gb-mono'}>
+                    {row.overdue ? `超期 ${Math.abs(row.dueInDays)} 天` : `剩余 ${row.dueInDays} 天`}
+                  </span>
+                );
+              },
             },
             {
               title: '标定结论',

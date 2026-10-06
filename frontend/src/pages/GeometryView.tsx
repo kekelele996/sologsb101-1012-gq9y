@@ -52,7 +52,17 @@ import {
 } from '@/utils/export';
 import { bearingDeg, round, stationDistances, toLocalPlane, planeViewBox } from '@/utils/geo';
 
-const EMPTY_COUNTS: CountMap = { arrays: 0, stations: 0, instruments: 0, calibrations: 0, replaces: 0 };
+const EMPTY_COUNTS: CountMap = {
+  arrays: 0,
+  stations: 0,
+  instruments: 0,
+  calibrations: 0,
+  replaces: 0,
+  spares: 0,
+  outboundOrders: 0,
+  installs: 0,
+  migrationIssues: 0,
+};
 
 export default function GeometryView() {
   const { message } = AntdApp.useApp();
@@ -62,6 +72,11 @@ export default function GeometryView() {
   const instruments = useAppSelector(selectInstruments);
   const calibrations = useAppSelector(selectCalibrations);
   const replaces = useAppSelector(selectReplaces);
+
+  const spares = useAppSelector((state) => state.warehouse.spares);
+  const outboundOrders = useAppSelector((state) => state.warehouse.orders);
+  const installs = useAppSelector((state) => state.ops.installs);
+  const migrationIssues = useAppSelector((state) => state.ops.issues);
 
   const [selectedArrayId, setSelectedArrayId] = useState<string | null>(null);
   const [counts, setCounts] = useState<CountMap>(EMPTY_COUNTS);
@@ -86,7 +101,7 @@ export default function GeometryView() {
   useEffect(() => {
     void refresh();
     // 数据变化后刷新统计
-  }, [arrays, stations, instruments, calibrations, replaces]);
+  }, [arrays, stations, instruments, calibrations, replaces, spares, outboundOrders, installs, migrationIssues]);
 
   const activeArrayId = selectedArrayId ?? arrays[0]?.id ?? null;
   const activeArray = arrays.find((row) => row.id === activeArrayId) ?? null;
@@ -106,9 +121,13 @@ export default function GeometryView() {
       instruments,
       calibrations,
       replaces,
+      spares,
+      outboundOrders,
+      installs,
+      migrationIssues,
     };
     return buildArraySummaries(payload);
-  }, [arrays, calibrations, instruments, replaces, stations]);
+  }, [arrays, calibrations, instruments, replaces, stations, spares, outboundOrders, installs, migrationIssues]);
 
   const activeSummary = summaries.find((row) => row.arrayId === activeArrayId) ?? null;
 
@@ -284,6 +303,10 @@ export default function GeometryView() {
         <StatBadge label="仪器" value={counts.instruments} suffix="台" tone="default" />
         <StatBadge label="标定记录" value={counts.calibrations} suffix="次" tone="success" />
         <StatBadge label="更换记录" value={counts.replaces} suffix="条" tone="warning" />
+        <StatBadge label="装备库备件" value={counts.spares} suffix="件" tone="info" />
+        <StatBadge label="出库单" value={counts.outboundOrders} suffix="张" tone="info" />
+        <StatBadge label="安装登记" value={counts.installs} suffix="条" tone="success" />
+        <StatBadge label="补号异常" value={counts.migrationIssues} suffix="条" tone="danger" />
       </div>
 
       {!activeArray || !activeSummary ? (
@@ -505,13 +528,17 @@ export default function GeometryView() {
             <Descriptions.Item label="台阵 / 台站">{counts.arrays} / {counts.stations}</Descriptions.Item>
             <Descriptions.Item label="仪器 / 标定">{counts.instruments} / {counts.calibrations}</Descriptions.Item>
             <Descriptions.Item label="更换记录">{counts.replaces}</Descriptions.Item>
+            <Descriptions.Item label="备件 / 出库单">{counts.spares} / {counts.outboundOrders}</Descriptions.Item>
+            <Descriptions.Item label="安装登记">{counts.installs}</Descriptions.Item>
+            <Descriptions.Item label="补号异常">{counts.migrationIssues}</Descriptions.Item>
             <Descriptions.Item label="最近备份时间" span={3}>
               {lastBackupAt ? new Date(lastBackupAt).toLocaleString('zh-CN') : '尚未备份'}
             </Descriptions.Item>
           </Descriptions>
           <p className="gb-hint">
             数据仅保存在当前浏览器 IndexedDB（{DB_NAME}）中，换浏览器或清空站点数据后不会自动跟随，请通过 JSON
-            备份迁移。导出内容包含 arrays / stations / instruments / calibrations / replaces 五张表。
+            备份迁移。导出内容包含 arrays / stations / instruments / calibrations / replaces / spares /
+            outboundOrders / installs / migrationIssues 九张表。
           </p>
         </Space>
       </Card>

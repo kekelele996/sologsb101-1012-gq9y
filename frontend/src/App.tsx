@@ -7,11 +7,14 @@ import { Link, Outlet, useLocation, useNavigate } from 'react-router-dom';
 import { Badge, Button, Layout, Menu, Space, Tag, Typography, message } from 'antd';
 import {
   AppstoreOutlined,
+  AuditOutlined,
   DashboardOutlined,
   ExperimentOutlined,
   GlobalOutlined,
+  InboxOutlined,
   SwapOutlined,
   ThunderboltOutlined,
+  ToolOutlined,
 } from '@ant-design/icons';
 import { ROUTES } from '@/router';
 import { useAppDispatch, useAppSelector } from '@/stores/store';
@@ -30,6 +33,15 @@ import {
   selectReplaces,
   startCalibrationSubscription,
 } from '@/stores/calibrationSlice';
+import { selectOutboundOrders, selectSpares, startWarehouseSubscription } from '@/stores/warehouseSlice';
+import {
+  selectActiveInstalls,
+  selectInstalls,
+  selectMigrationIssues,
+  selectRecoveryFailed,
+  selectWithdrawnPendingReturn,
+  startOpsSubscription,
+} from '@/stores/opsSlice';
 import { DB_NAME, DB_VERSION, initDatabase } from '@/utils/db';
 
 const { Header, Sider, Content, Footer } = Layout;
@@ -38,6 +50,9 @@ const { Header, Sider, Content, Footer } = Layout;
 function buildSelectedKey(pathname: string, currentArrayId: string | null): string {
   if (pathname.startsWith('/calibrations')) return ROUTES.calibrations;
   if (pathname.startsWith('/replacements')) return ROUTES.replacements;
+  if (pathname.startsWith('/warehouse')) return ROUTES.warehouse;
+  if (pathname.startsWith('/operations')) return ROUTES.operations;
+  if (pathname.startsWith('/reconcile')) return ROUTES.reconcile;
   if (pathname.startsWith('/geometry')) return ROUTES.geometry;
   if (pathname.startsWith('/stations/') && currentArrayId) return ROUTES.stations(currentArrayId);
   return ROUTES.arrays;
@@ -54,6 +69,13 @@ export default function App() {
   const instruments = useAppSelector(selectInstruments);
   const calibrations = useAppSelector(selectCalibrations);
   const replaces = useAppSelector(selectReplaces);
+  const spares = useAppSelector(selectSpares);
+  const orders = useAppSelector(selectOutboundOrders);
+  const installs = useAppSelector(selectInstalls);
+  const activeInstalls = useAppSelector(selectActiveInstalls);
+  const withdrawnPending = useAppSelector(selectWithdrawnPendingReturn);
+  const recoveryFailed = useAppSelector(selectRecoveryFailed);
+  const migrationIssues = useAppSelector(selectMigrationIssues);
   const currentArrayId = useAppSelector(selectCurrentArrayId);
   const ready = useAppSelector((state) => state.array.ready);
 
@@ -67,6 +89,8 @@ export default function App() {
         startArraySubscription(dispatch);
         startInstrumentSubscription(dispatch);
         startCalibrationSubscription(dispatch);
+        startWarehouseSubscription(dispatch);
+        startOpsSubscription(dispatch);
       } catch (error) {
         if (cancelled) return;
         messageApi.error(
@@ -83,6 +107,9 @@ export default function App() {
   const selectedKey = buildSelectedKey(location.pathname, currentArrayId);
   const unqualified = calibrations.filter((row) => row.responseVerdict === '不合格').length;
   const pendingReplaces = replaces.filter((row) => row.state !== '已复核').length;
+  const pendingReceiveOrders = orders.filter((row) => row.state === '已开立').length;
+  const unresolvedIssues = migrationIssues.filter((row) => !row.resolved).length;
+  const opsAttention = withdrawnPending.length + recoveryFailed.length + unresolvedIssues;
 
   return (
     <>
@@ -118,6 +145,11 @@ export default function App() {
               },
               { key: ROUTES.calibrations, icon: <DashboardOutlined />, label: '标定记录台' },
               { key: ROUTES.replacements, icon: <SwapOutlined />, label: '合格评定与更换' },
+              { type: 'divider' as const },
+              { key: ROUTES.warehouse, icon: <InboxOutlined />, label: '装备库（备件/出库）' },
+              { key: ROUTES.operations, icon: <ToolOutlined />, label: '台站运维（安装/拆卸）' },
+              { key: ROUTES.reconcile, icon: <AuditOutlined />, label: '序列号对账' },
+              { type: 'divider' as const },
               { key: ROUTES.geometry, icon: <GlobalOutlined />, label: '台阵几何与备份' },
             ]}
           />
@@ -127,7 +159,7 @@ export default function App() {
                 <AppstoreOutlined /> 台阵 {arrays.length} · 台站 {stations.length}
               </span>
               <span>
-                <ExperimentOutlined /> 仪器 {instruments.length}
+                <ExperimentOutlined /> 仪器 {instruments.length} · 安装位 {activeInstalls.length}/{installs.length}
               </span>
               <span>
                 <ThunderboltOutlined /> 标定 {calibrations.length} · 不合格 {unqualified}
@@ -135,6 +167,14 @@ export default function App() {
               <span>
                 <SwapOutlined /> 更换未闭环 {pendingReplaces}
               </span>
+              <span>
+                <InboxOutlined /> 备件 {spares.length} · 待领用单 {pendingReceiveOrders}
+              </span>
+              {opsAttention > 0 ? (
+                <span style={{ color: '#f5b041' }}>
+                  <AuditOutlined /> 待处理：撤回/回收/补号 {opsAttention}
+                </span>
+              ) : null}
             </Space>
           </div>
         </Sider>

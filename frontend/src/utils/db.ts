@@ -12,9 +12,14 @@ import type { Instrument } from '@/types/instrument';
 import { judgeCalibration } from '@/types/calibration';
 import type { Calibration } from '@/types/calibration';
 import type { Replace } from '@/types/replace';
+import type { SparePart } from '@/types/spare';
+import type { OutboundOrder } from '@/types/outbound';
+import type { InstallRecord } from '@/types/install';
+import type { MigrationIssue } from '@/types/migration';
+import { buildLegacyOrderNo, buildOrderNo } from '@/types/outbound';
 
 /** 当前数据结构版本号：每次调整字段结构必须 +1 并补迁移 */
-export const DB_VERSION = 2;
+export const DB_VERSION = 3;
 
 /** 数据库名（浏览器 IndexedDB 中的库名） */
 export const DB_NAME = 'gbseisarray';
@@ -36,6 +41,10 @@ export interface BackupPayload {
   instruments: Instrument[];
   calibrations: Calibration[];
   replaces: Replace[];
+  spares: SparePart[];
+  outboundOrders: OutboundOrder[];
+  installs: InstallRecord[];
+  migrationIssues: MigrationIssue[];
 }
 
 export class SeisArrayDatabase extends Dexie {
@@ -44,6 +53,14 @@ export class SeisArrayDatabase extends Dexie {
   instruments!: Table<Instrument, string>;
   calibrations!: Table<Calibration, string>;
   replaces!: Table<Replace, string>;
+  /** 装备库：备件库存 */
+  spares!: Table<SparePart, string>;
+  /** 装备库：出库单 */
+  outboundOrders!: Table<OutboundOrder, string>;
+  /** 台站班组：安装位 / 拆卸登记 */
+  installs!: Table<InstallRecord, string>;
+  /** 升级补号异常清单 */
+  migrationIssues!: Table<MigrationIssue, string>;
 
   constructor() {
     super(DB_NAME);
@@ -58,7 +75,7 @@ export class SeisArrayDatabase extends Dexie {
     });
 
     // v2：补齐筛选与统计需要的索引（孔径/布设日期、经纬度/基岩、类型/序列号、灵敏度/结论、原因）
-    this.version(DB_VERSION)
+    this.version(2)
       .stores({
         arrays: 'id, name, state, apertureKm, deployDate, department, updatedAt',
         stations: 'id, arrayId, code, lat, lng, elevM, bedrock, updatedAt',
@@ -86,6 +103,118 @@ export class SeisArrayDatabase extends Dexie {
               Object.assign(row, factory());
             });
         }
+      });
+
+    // v3：装备库 / 台站班组分账 —— 备件库存、出库单、安装位登记、补号异常四张表。
+    // 旧 instruments 流水拆成「装备库出库单 + 台站安装登记」，缺单号的按台站码 + 安装日期补，补不出单列。
+    this.version(DB_VERSION)
+      .stores({
+        spares: 'id, serialNo, state, outboundId, type, inboundDate, updatedAt',
+        outboundOrders: 'id, orderNo, serialNo, stationCode, state, outboundDate, installId, updatedAt',
+        installs: 'id, stationId, stationCode, serialNo, outboundId, state, installDate, removedDate:removeDate, withdrawn, updatedAt',
+        migrationIssues: 'id, kind, sourceInstrumentId, resolved, updatedAt',
+      })
+      .upgrade(async (tx) => {
+        const now = Date.now();
+        const stations = await tx.table<SeisStation, string>('stations').toArray();
+        const stationById = new Map(stations.map((station) => [station.id, station]));
+        const legacyInstruments = await tx
+          .table<Instrument, string>('instruments')
+          .toArray();
+
+        const spareRows: SparePart[] = [];
+        const orderRows: OutboundOrder[] = [];
+        const installRows: InstallRecord[] = [];
+        const issueRows: MigrationIssue[] = [];
+
+        legacyInstruments.forEach((ins, index) => {
+          const station = stationById.get(ins.stationId);
+          const stationCode = station?.code ?? '';
+          const legacyNo = buildLegacyOrderNo(stationCode, ins.installDate);
+          const stamp = now + index;
+          const baseSnapshot = {
+            serialNo: ins.serialNo ?? '',
+            type: ins.type ?? '宽频带',
+            model: ins.model ?? '',
+          };
+
+          // 台站侧：安装位登记（全部旧仪器都视为曾装上台站；已停用即已拆卸）
+          installRows.push({
+            id: `ist_legacy_${ins.id}`,
+            stationId: ins.stationId,
+            stationCode,
+            slot: '默认安装位',
+            ...baseSnapshot,
+            outboundId: legacyNo ? `ob_legacy_${ins.id}` : null,
+            outboundNo: legacyNo ?? '',
+            installDate: ins.installDate ?? '',
+            installer: '',
+            state: ins.state === '已停用' ? '已拆卸' : '已安装',
+            removeDate: null,
+            removeReason: ins.state === '已停用' ? (ins.remark ?? '历史停用') : '',
+            recoveryResult: null,
+            retryCount: 0,
+            recoveryNote: '',
+            withdrawn: false,
+            remark: ins.remark ?? '',
+            createdAt: typeof ins.createdAt === 'number' ? ins.createdAt : stamp,
+            updatedAt: typeof ins.updatedAt === 'number' ? ins.updatedAt : stamp,
+          });
+
+          // 装备库侧：能补出单号才视为历史出库凭证；补不出的不造假单，只留库存快照 + 异常清单
+          if (legacyNo) {
+            spareRows.push({
+              id: `spr_legacy_${ins.id}`,
+              ...baseSnapshot,
+              state: ins.state === '已停用' ? '在库' : '已出库',
+              inboundDate: ins.installDate ?? '',
+              outboundId: `ob_legacy_${ins.id}`,
+              remark: '旧数据迁移生成',
+              createdAt: stamp,
+              updatedAt: stamp,
+            });
+            orderRows.push({
+              id: `ob_legacy_${ins.id}`,
+              orderNo: legacyNo,
+              ...baseSnapshot,
+              stationCode,
+              purpose: '历史安装数据补单',
+              receiver: '',
+              outboundDate: ins.installDate ?? '',
+              state: ins.state === '已停用' ? '已退库' : '已领用',
+              returnDate: ins.state === '已停用' ? ins.installDate ?? null : null,
+              returnReason: ins.state === '已停用' ? '历史停用回库' : '',
+              installId: `ist_legacy_${ins.id}`,
+              remark: '升级时按台站码 + 安装日期补号',
+              createdAt: stamp,
+              updatedAt: stamp,
+            });
+          } else {
+            const missing = [
+              !stationCode ? '台站码' : null,
+              !ins.installDate ? '安装日期' : null,
+            ]
+              .filter(Boolean)
+              .join('、');
+            issueRows.push({
+              id: `mig_legacy_${ins.id}`,
+              kind: '旧数据补号失败',
+              sourceInstrumentId: ins.id,
+              serialNo: ins.serialNo ?? '',
+              stationCode,
+              installDate: ins.installDate ?? '',
+              reason: `缺少${missing || '关键信息'}，无法按台站码 + 安装日期补出库单号`,
+              resolved: false,
+              createdAt: stamp,
+              updatedAt: stamp,
+            });
+          }
+        });
+
+        await tx.table('spares').bulkPut(spareRows);
+        await tx.table('outboundOrders').bulkPut(orderRows);
+        await tx.table('installs').bulkPut(installRows);
+        await tx.table('migrationIssues').bulkPut(issueRows);
       });
   }
 }
@@ -488,9 +617,320 @@ export async function seedDemoData(): Promise<void> {
     },
   ];
 
+  /* -------- v3：装备库备件 / 出库单 × 台站安装登记 的分账演示数据 --------
+   * 刻意覆盖：在库/锁定/已出库、已开立未领用、出了库没装上、装了没出库、
+   * 撤回领用待退库、旧机回收失败（只重试台站侧）、补号异常各一类。 */
+  const spareRows: SparePart[] = [
+    // 已开立（锁定待领用）：雷击损坏那台的新备件已开单
+    {
+      id: 'spr_l4c_new',
+      type: '短周期',
+      model: 'L-4C-3D',
+      serialNo: 'L4C-20250301-21',
+      state: '锁定',
+      inboundDate: daysAgo(90),
+      outboundId: 'ob_ltx02_open',
+      remark: '待停电窗口领用',
+      createdAt: now - 90 * 86400000,
+      updatedAt: now - 2 * 86400000,
+    },
+    // 已出库：HX02 已领已装
+    {
+      id: 'spr_cmg_hx02',
+      type: '宽频带',
+      model: 'CMG-3ESPC',
+      serialNo: 'CMG-3E-20250410-33',
+      state: '已出库',
+      inboundDate: daysAgo(120),
+      outboundId: 'ob_hx02_received',
+      remark: '',
+      createdAt: now - 120 * 86400000,
+      updatedAt: now - 20 * 86400000,
+    },
+    // 出了库没装上：LTX03 备件已领，班组还没登记安装
+    {
+      id: 'spr_sts_ltx03',
+      type: '宽频带',
+      model: 'STS-2.5',
+      serialNo: 'STS25-20250920-42',
+      state: '已出库',
+      inboundDate: daysAgo(200),
+      outboundId: 'ob_ltx03_received',
+      remark: '已随车带到台站，未安装',
+      createdAt: now - 200 * 86400000,
+      updatedAt: now - 3 * 86400000,
+    },
+    // 撤回领用待退库：备件物理上还在班组，装备库尚未确认退库
+    {
+      id: 'spr_fss_withdraw',
+      type: '短周期',
+      model: 'FSS-3B',
+      serialNo: 'FSS3B-20250812-38',
+      state: '已出库',
+      inboundDate: daysAgo(150),
+      outboundId: 'ob_ltx01_withdrawn',
+      remark: '班组已撤回领用，等待装备库退库确认',
+      createdAt: now - 150 * 86400000,
+      updatedAt: now - 5 * 86400000,
+    },
+    // 回收失败的旧机已拆回装备库（出库单保持已领用不回退）
+    {
+      id: 'spr_cmg_ltx03_old',
+      type: '宽频带',
+      model: 'CMG-3ESPC',
+      serialNo: 'CMG-3E-20200115-09',
+      state: '在库',
+      inboundDate: daysAgo(400),
+      outboundId: 'ob_ltx03_old_received',
+      remark: '回收失败旧机，待返厂',
+      createdAt: now - 400 * 86400000,
+      updatedAt: now - 9 * 86400000,
+    },
+    // 在库备件（无单据占用）
+    {
+      id: 'spr_stock_1',
+      type: '宽频带',
+      model: 'Trillium-120',
+      serialNo: 'T120-20250701-05',
+      state: '在库',
+      inboundDate: daysAgo(60),
+      outboundId: null,
+      remark: '新到货',
+      createdAt: now - 60 * 86400000,
+      updatedAt: now - 60 * 86400000,
+    },
+    {
+      id: 'spr_stock_2',
+      type: '强震',
+      model: 'ES-T',
+      serialNo: 'EST-20250715-12',
+      state: '在库',
+      inboundDate: daysAgo(50),
+      outboundId: null,
+      remark: '',
+      createdAt: now - 50 * 86400000,
+      updatedAt: now - 50 * 86400000,
+    },
+  ];
+
+  const outboundRows: OutboundOrder[] = [
+    {
+      id: 'ob_ltx02_open',
+      orderNo: buildOrderNo(today, 1),
+      serialNo: 'L4C-20250301-21',
+      type: '短周期',
+      model: 'L-4C-3D',
+      stationCode: 'LTX02',
+      purpose: '雷击损坏更换（待更换工单）',
+      receiver: '周渝',
+      outboundDate: daysAgo(2),
+      state: '已开立',
+      returnDate: null,
+      returnReason: '',
+      installId: null,
+      remark: '已开单，序列号锁定待领用',
+      createdAt: now - 2 * 86400000,
+      updatedAt: now - 2 * 86400000,
+    },
+    {
+      id: 'ob_hx02_received',
+      orderNo: buildOrderNo(daysAgo(20), 1),
+      serialNo: 'CMG-3E-20250410-33',
+      type: '宽频带',
+      model: 'CMG-3ESPC',
+      stationCode: 'HX02',
+      purpose: '自噪超标整机更换',
+      receiver: '林之遥',
+      outboundDate: daysAgo(20),
+      state: '已领用',
+      returnDate: null,
+      returnReason: '',
+      installId: 'ist_hx02_new',
+      remark: '',
+      createdAt: now - 20 * 86400000,
+      updatedAt: now - 20 * 86400000,
+    },
+    {
+      id: 'ob_ltx03_received',
+      orderNo: buildOrderNo(daysAgo(3), 1),
+      serialNo: 'STS25-20250920-42',
+      type: '宽频带',
+      model: 'STS-2.5',
+      stationCode: 'LTX03',
+      purpose: '备件轮换',
+      receiver: '周渝',
+      outboundDate: daysAgo(3),
+      state: '已领用',
+      returnDate: null,
+      returnReason: '',
+      installId: null,
+      remark: '对账异常：出了库还没装上台站',
+      createdAt: now - 3 * 86400000,
+      updatedAt: now - 3 * 86400000,
+    },
+    {
+      id: 'ob_ltx01_withdrawn',
+      orderNo: buildOrderNo(daysAgo(12), 1),
+      serialNo: 'FSS3B-20250812-38',
+      type: '短周期',
+      model: 'FSS-3B',
+      stationCode: 'LTX01',
+      purpose: '备份位升级',
+      receiver: '陈立群',
+      outboundDate: daysAgo(12),
+      state: '已领用',
+      returnDate: null,
+      returnReason: '',
+      installId: 'ist_ltx01_withdrawn',
+      remark: '班组已撤回领用，待装备库确认退库后解锁序列号',
+      createdAt: now - 12 * 86400000,
+      updatedAt: now - 5 * 86400000,
+    },
+    {
+      id: 'ob_ltx03_old_received',
+      orderNo: buildOrderNo(daysAgo(400), 2),
+      serialNo: 'CMG-3E-20200115-09',
+      type: '宽频带',
+      model: 'CMG-3ESPC',
+      stationCode: 'LTX03',
+      purpose: '历史装机出库',
+      receiver: '陈立群',
+      outboundDate: daysAgo(400),
+      state: '已领用',
+      returnDate: null,
+      returnReason: '',
+      installId: 'ist_ltx03_old',
+      remark: '旧机回收失败，出库单不回退',
+      createdAt: now - 400 * 86400000,
+      updatedAt: now - 9 * 86400000,
+    },
+  ];
+
+  const installRows: InstallRecord[] = [
+    {
+      id: 'ist_hx02_new',
+      stationId: 'stn_hx_02',
+      stationCode: 'HX02',
+      slot: '地表基岩位',
+      serialNo: 'CMG-3E-20250410-33',
+      type: '宽频带',
+      model: 'CMG-3ESPC',
+      outboundId: 'ob_hx02_received',
+      outboundNo: buildOrderNo(daysAgo(20), 1),
+      installDate: daysAgo(20),
+      installer: '林之遥',
+      state: '已安装',
+      removeDate: null,
+      removeReason: '',
+      recoveryResult: null,
+      retryCount: 0,
+      recoveryNote: '',
+      withdrawn: false,
+      remark: '更换后待复核标定',
+      createdAt: now - 20 * 86400000,
+      updatedAt: now - 20 * 86400000,
+    },
+    {
+      id: 'ist_ltx01_withdrawn',
+      stationId: 'stn_ltx_01',
+      stationCode: 'LTX01',
+      slot: '备份短周期位',
+      serialNo: 'FSS3B-20250812-38',
+      type: '短周期',
+      model: 'FSS-3B',
+      outboundId: 'ob_ltx01_withdrawn',
+      outboundNo: buildOrderNo(daysAgo(12), 1),
+      installDate: daysAgo(10),
+      installer: '陈立群',
+      state: '已拆卸',
+      removeDate: daysAgo(5),
+      removeReason: '撤回领用：型号与采集器不匹配',
+      recoveryResult: '已回收',
+      retryCount: 0,
+      recoveryNote: '',
+      withdrawn: true,
+      remark: '台站侧已撤回，等装备库退库',
+      createdAt: now - 10 * 86400000,
+      updatedAt: now - 5 * 86400000,
+    },
+    {
+      id: 'ist_ltx03_old',
+      stationId: 'stn_ltx_03',
+      stationCode: 'LTX03',
+      slot: '井下位 B',
+      serialNo: 'CMG-3E-20200115-09',
+      type: '宽频带',
+      model: 'CMG-3ESPC',
+      outboundId: 'ob_ltx03_old_received',
+      outboundNo: buildOrderNo(daysAgo(400), 2),
+      installDate: daysAgo(400),
+      installer: '陈立群',
+      state: '回收失败',
+      removeDate: daysAgo(9),
+      removeReason: '到期轮换',
+      recoveryResult: '回收失败',
+      retryCount: 2,
+      recoveryNote: '第 1 次：运输车辆故障；第 2 次：旧机底座锈蚀未拆成，已约井下作业窗口',
+      withdrawn: false,
+      remark: '只在台站侧重试回收，装备库出库单不动',
+      createdAt: now - 400 * 86400000,
+      updatedAt: now - 1 * 86400000,
+    },
+    {
+      // 装了没出库：班组先装后补手续，装备库查无已领用单
+      id: 'ist_hx01_unplanned',
+      stationId: 'stn_hx_01',
+      stationCode: 'HX01',
+      slot: '强震备机位',
+      serialNo: 'GLP2-20250928-07',
+      type: '强震',
+      model: 'GL-P2B',
+      outboundId: null,
+      outboundNo: '',
+      installDate: daysAgo(8),
+      installer: '林之遥',
+      state: '已安装',
+      removeDate: null,
+      removeReason: '',
+      recoveryResult: null,
+      retryCount: 0,
+      recoveryNote: '',
+      withdrawn: false,
+      remark: '应急先装，出库手续未补',
+      createdAt: now - 8 * 86400000,
+      updatedAt: now - 8 * 86400000,
+    },
+  ];
+
+  // 升级补号异常演示：来源仪器缺失安装日期，补不出单号（新库演示等价物）
+  const migrationIssueRows: MigrationIssue[] = [
+    {
+      id: 'mig_demo_missing_date',
+      kind: '旧数据补号失败',
+      sourceInstrumentId: 'ins_legacy_demo_unknown',
+      serialNo: 'TC-20180707-00',
+      stationCode: 'LTX03',
+      installDate: '',
+      reason: '缺少安装日期，无法按台站码 + 安装日期补出库单号',
+      resolved: false,
+      createdAt: now - 30 * 86400000,
+      updatedAt: now - 30 * 86400000,
+    },
+  ];
+
   await db.transaction(
     'rw',
-    [db.arrays, db.stations, db.instruments, db.calibrations, db.replaces],
+    [
+      db.arrays,
+      db.stations,
+      db.instruments,
+      db.calibrations,
+      db.replaces,
+      db.spares,
+      db.outboundOrders,
+      db.installs,
+      db.migrationIssues,
+    ],
     async () => {
       const stamp = (offset: number): { createdAt: number; updatedAt: number } => ({
         createdAt: now + offset,
@@ -537,6 +977,10 @@ export async function seedDemoData(): Promise<void> {
       await db.instruments.bulkPut(instrumentRows);
       await db.calibrations.bulkPut(calibrationRows);
       await db.replaces.bulkPut(replaces);
+      await db.spares.bulkPut(spareRows);
+      await db.outboundOrders.bulkPut(outboundRows);
+      await db.installs.bulkPut(installRows);
+      await db.migrationIssues.bulkPut(migrationIssueRows);
     }
   );
 }
@@ -555,7 +999,17 @@ export async function initDatabase(): Promise<void> {
 export async function clearAllTables(): Promise<void> {
   await db.transaction(
     'rw',
-    [db.arrays, db.stations, db.instruments, db.calibrations, db.replaces],
+    [
+      db.arrays,
+      db.stations,
+      db.instruments,
+      db.calibrations,
+      db.replaces,
+      db.spares,
+      db.outboundOrders,
+      db.installs,
+      db.migrationIssues,
+    ],
     async () => {
       await Promise.all([
         db.arrays.clear(),
@@ -563,6 +1017,10 @@ export async function clearAllTables(): Promise<void> {
         db.instruments.clear(),
         db.calibrations.clear(),
         db.replaces.clear(),
+        db.spares.clear(),
+        db.outboundOrders.clear(),
+        db.installs.clear(),
+        db.migrationIssues.clear(),
       ]);
     }
   );
@@ -576,14 +1034,19 @@ export async function resetDatabase(): Promise<void> {
 
 /** 统计各表行数，供页脚概览与几何页展示 */
 export async function countAll(): Promise<Record<string, number>> {
-  const [arrays, stations, instruments, calibrations, replaces] = await Promise.all([
-    db.arrays.count(),
-    db.stations.count(),
-    db.instruments.count(),
-    db.calibrations.count(),
-    db.replaces.count(),
-  ]);
-  return { arrays, stations, instruments, calibrations, replaces };
+  const [arrays, stations, instruments, calibrations, replaces, spares, outboundOrders, installs, migrationIssues] =
+    await Promise.all([
+      db.arrays.count(),
+      db.stations.count(),
+      db.instruments.count(),
+      db.calibrations.count(),
+      db.replaces.count(),
+      db.spares.count(),
+      db.outboundOrders.count(),
+      db.installs.count(),
+      db.migrationIssues.count(),
+    ]);
+  return { arrays, stations, instruments, calibrations, replaces, spares, outboundOrders, installs, migrationIssues };
 }
 
 /** 写入结构版本号到 localStorage，便于几何页比对 */

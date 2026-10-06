@@ -7,6 +7,7 @@ import { useSelector } from 'react-redux';
 import { selectArrays, selectStations } from '@/stores/arraySlice';
 import { selectInstruments } from '@/stores/instrumentSlice';
 import { selectCalibrations } from '@/stores/calibrationSlice';
+import { selectActiveInstalls } from '@/stores/opsSlice';
 import { calibrateDueText, sensitivityDelta, type SensitivityDelta } from '@/types/calibration';
 import { CALIBRATION_CYCLE_DAYS, daysUntilDue } from '@/types/instrument';
 import type { Calibration, ResponseVerdict } from '@/types/calibration';
@@ -32,6 +33,8 @@ export interface InstrumentCalibHistory {
   overdue: boolean;
   /** 是否处于待标定状态 */
   pending: boolean;
+  /** 是否仍装在台站安装位上（拆下来的旧机不进超期名单） */
+  installed: boolean;
   /** 历次结论中最差的一次 */
   worstVerdict: ResponseVerdict;
   /** 灵敏度序列（由旧到新），供趋势展示 */
@@ -56,6 +59,17 @@ export function useCalibHistory(): UseCalibHistoryResult {
   const stations = useSelector(selectStations);
   const instruments = useSelector(selectInstruments);
   const calibrations = useSelector(selectCalibrations);
+  const activeInstalls = useSelector(selectActiveInstalls);
+
+  /** 仍在安装位上的序列号集合（含旧数据迁移出来的安装登记） */
+  const installedSerials = useMemo(() => {
+    const set = new Set<string>();
+    activeInstalls.forEach((row) => {
+      const serial = row.serialNo.trim();
+      if (serial) set.add(serial);
+    });
+    return set;
+  }, [activeInstalls]);
 
   const histories = useMemo<InstrumentCalibHistory[]>(() => {
     return instruments
@@ -72,6 +86,10 @@ export function useCalibHistory(): UseCalibHistoryResult {
         const worstVerdict = rows.reduce<ResponseVerdict>((worst, row) => {
           return VERDICT_ORDER[row.responseVerdict] > VERDICT_ORDER[worst] ? row.responseVerdict : worst;
         }, '合格');
+        // 已停用且不在安装位的是拆下旧机，不进超期名单；安装表有记录时以安装表为准
+        const inSlot = installedSerials.has(instrument.serialNo.trim());
+        const installed = instrument.state === '已停用' ? inSlot : true;
+        const overdue = installed && dueInDays < 0;
         return {
           instrument,
           stationCode: station?.code ?? '未知台站',
@@ -82,8 +100,9 @@ export function useCalibHistory(): UseCalibHistoryResult {
           delta,
           count: rows.length,
           dueInDays,
-          overdue: dueInDays < 0,
-          pending: instrument.state === '待标定' || dueInDays < 0,
+          overdue,
+          pending: installed && (instrument.state === '待标定' || dueInDays < 0),
+          installed,
           worstVerdict,
           trend: [...rows]
             .reverse()
@@ -91,7 +110,7 @@ export function useCalibHistory(): UseCalibHistoryResult {
         };
       })
       .sort((a, b) => a.dueInDays - b.dueInDays);
-  }, [arrays, calibrations, instruments, stations]);
+  }, [arrays, calibrations, installedSerials, instruments, stations]);
 
   const historyOf = useCallback(
     (instrumentId: string): InstrumentCalibHistory | null =>

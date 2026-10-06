@@ -15,20 +15,35 @@ import type { ResponseVerdict } from '@/types/calibration';
 import { apertureKm, centroid, haversineKm, round, stationDistances } from '@/utils/geo';
 
 /** 备份集合键名 */
-export const BACKUP_KEYS = ['arrays', 'stations', 'instruments', 'calibrations', 'replaces'] as const;
+export const BACKUP_KEYS = [
+  'arrays',
+  'stations',
+  'instruments',
+  'calibrations',
+  'replaces',
+  'spares',
+  'outboundOrders',
+  'installs',
+  'migrationIssues',
+] as const;
 export type BackupKey = (typeof BACKUP_KEYS)[number];
 
 export type CountMap = Record<BackupKey, number>;
 
 /** 组装当前本地数据的完整快照 */
 export async function buildBackupPayload(): Promise<BackupPayload> {
-  const [arrays, stations, instruments, calibrations, replaces] = await Promise.all([
-    db.arrays.toArray(),
-    db.stations.toArray(),
-    db.instruments.toArray(),
-    db.calibrations.toArray(),
-    db.replaces.toArray(),
-  ]);
+  const [arrays, stations, instruments, calibrations, replaces, spares, outboundOrders, installs, migrationIssues] =
+    await Promise.all([
+      db.arrays.toArray(),
+      db.stations.toArray(),
+      db.instruments.toArray(),
+      db.calibrations.toArray(),
+      db.replaces.toArray(),
+      db.spares.toArray(),
+      db.outboundOrders.toArray(),
+      db.installs.toArray(),
+      db.migrationIssues.toArray(),
+    ]);
   return {
     app: 'gbseisarray',
     dbVersion: DB_VERSION,
@@ -38,6 +53,10 @@ export async function buildBackupPayload(): Promise<BackupPayload> {
     instruments,
     calibrations,
     replaces,
+    spares,
+    outboundOrders,
+    installs,
+    migrationIssues,
   };
 }
 
@@ -55,7 +74,8 @@ export function validateBackup(input: unknown): {
   if (obj.app !== undefined && obj.app !== 'gbseisarray') {
     errors.push('app 字段应为 gbseisarray，文件来源不明');
   }
-  for (const key of BACKUP_KEYS) {
+  // v3 新增的四表允许缺失（旧版本备份导入时按空表处理，再由用户走补录流程）
+  for (const key of ['arrays', 'stations', 'instruments', 'calibrations', 'replaces'] as const) {
     if (!Array.isArray(obj[key])) errors.push(`${key} 字段缺失或不是数组`);
   }
   if (errors.length > 0) return { ok: false, errors, payload: null };
@@ -68,6 +88,10 @@ export function validateBackup(input: unknown): {
     instruments: obj.instruments ?? [],
     calibrations: obj.calibrations ?? [],
     replaces: obj.replaces ?? [],
+    spares: Array.isArray(obj.spares) ? obj.spares : [],
+    outboundOrders: Array.isArray(obj.outboundOrders) ? obj.outboundOrders : [],
+    installs: Array.isArray(obj.installs) ? obj.installs : [],
+    migrationIssues: Array.isArray(obj.migrationIssues) ? obj.migrationIssues : [],
   };
   return { ok: true, errors, payload };
 }
@@ -80,6 +104,10 @@ export function countPayload(payload: BackupPayload): CountMap {
     instruments: payload.instruments.length,
     calibrations: payload.calibrations.length,
     replaces: payload.replaces.length,
+    spares: payload.spares.length,
+    outboundOrders: payload.outboundOrders.length,
+    installs: payload.installs.length,
+    migrationIssues: payload.migrationIssues.length,
   };
 }
 
@@ -117,13 +145,27 @@ export async function importBackup(payload: BackupPayload, overwrite: boolean): 
   if (overwrite) await clearAllTables();
   await db.transaction(
     'rw',
-    [db.arrays, db.stations, db.instruments, db.calibrations, db.replaces],
+    [
+      db.arrays,
+      db.stations,
+      db.instruments,
+      db.calibrations,
+      db.replaces,
+      db.spares,
+      db.outboundOrders,
+      db.installs,
+      db.migrationIssues,
+    ],
     async () => {
       await db.arrays.bulkPut(payload.arrays);
       await db.stations.bulkPut(payload.stations);
       await db.instruments.bulkPut(payload.instruments);
       await db.calibrations.bulkPut(payload.calibrations);
       await db.replaces.bulkPut(payload.replaces);
+      await db.spares.bulkPut(payload.spares);
+      await db.outboundOrders.bulkPut(payload.outboundOrders);
+      await db.installs.bulkPut(payload.installs);
+      await db.migrationIssues.bulkPut(payload.migrationIssues);
     }
   );
   return countPayload(payload);
@@ -134,6 +176,7 @@ export function remapIds(payload: BackupPayload): BackupPayload {
   const arrayMap = new Map<string, string>();
   const stationMap = new Map<string, string>();
   const instrumentMap = new Map<string, string>();
+  const outboundMap = new Map<string, string>();
 
   const arrays = payload.arrays.map((row) => {
     const id = createId('arr');
@@ -160,7 +203,39 @@ export function remapIds(payload: BackupPayload): BackupPayload {
     id: createId('rpl'),
     instrumentId: instrumentMap.get(row.instrumentId) ?? row.instrumentId,
   }));
-  return { ...payload, arrays, stations, instruments, calibrations, replaces };
+  // 出库单先重映射，备件 / 安装登记再引用新 id
+  const outboundOrders = payload.outboundOrders.map((row) => {
+    const id = createId('ob');
+    outboundMap.set(row.id, id);
+    return { ...row, id };
+  });
+  const spares = payload.spares.map((row) => ({
+    ...row,
+    id: createId('spr'),
+    outboundId: row.outboundId ? outboundMap.get(row.outboundId) ?? null : null,
+  }));
+  const installs = payload.installs.map((row) => ({
+    ...row,
+    id: createId('ist'),
+    stationId: stationMap.get(row.stationId) ?? row.stationId,
+    outboundId: row.outboundId ? outboundMap.get(row.outboundId) ?? null : null,
+  }));
+  const migrationIssues = payload.migrationIssues.map((row) => ({
+    ...row,
+    id: createId('mig'),
+  }));
+  return {
+    ...payload,
+    arrays,
+    stations,
+    instruments,
+    calibrations,
+    replaces,
+    spares,
+    outboundOrders,
+    installs,
+    migrationIssues,
+  };
 }
 
 /** 按台阵汇总的几何与标定结论 */

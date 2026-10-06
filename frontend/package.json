@@ -8,7 +8,8 @@
     "dev": "vite --host --port 22812",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview --host --port 22812",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "verify:bounded-context": "tsx scripts/verify-bounded-context.ts"
   },
   "dependencies": {
     "@ant-design/icons": "^5.5.1",
@@ -26,6 +27,8 @@
     "@types/react": "^18.3.12",
     "@types/react-dom": "^18.3.1",
     "@vitejs/plugin-react": "^4.3.4",
+    "fake-indexeddb": "^6.2.5",
+    "tsx": "^4.23.15",
     "typescript": "~5.6.3",
     "vite": "^5.4.11"
   }

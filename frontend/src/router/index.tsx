@@ -1,5 +1,6 @@
 /**
- * 路由表：/arrays、/stations/:id/instruments、/calibrations、/replacements、/geometry
+ * 路由表：/arrays、/stations/:id/instruments、/calibrations、/replacements、
+ * /warehouse（装备库）、/operations（台站运维）、/reconcile（序列号对账）、/geometry
  * 路径与提示词逐字一致；页面按路由懒加载，构建时自动分包。
  */
 import { Suspense, lazy, type ReactNode } from 'react';
@@ -11,6 +12,9 @@ const ArrayList = lazy(() => import('@/pages/ArrayList'));
 const StationInstruments = lazy(() => import('@/pages/StationInstruments'));
 const CalibrationBoard = lazy(() => import('@/pages/CalibrationBoard'));
 const ReplaceBoard = lazy(() => import('@/pages/ReplaceBoard'));
+const WarehousePage = lazy(() => import('@/pages/WarehousePage'));
+const StationOpsPage = lazy(() => import('@/pages/StationOpsPage'));
+const ReconcilePage = lazy(() => import('@/pages/ReconcilePage'));
 const GeometryView = lazy(() => import('@/pages/GeometryView'));
 
 /** 懒加载页面占位 */
@@ -34,6 +38,9 @@ export const ROUTES = {
   stations: (arrayId: string): string => `/stations/${arrayId}/instruments`,
   calibrations: '/calibrations',
   replacements: '/replacements',
+  warehouse: '/warehouse',
+  operations: '/operations',
+  reconcile: '/reconcile',
   geometry: '/geometry',
 } as const;
 
@@ -47,6 +54,9 @@ export const appRoutes: RouteObject[] = [
       { path: 'stations/:id/instruments', element: withSuspense(<StationInstruments />) },
       { path: 'calibrations', element: withSuspense(<CalibrationBoard />) },
       { path: 'replacements', element: withSuspense(<ReplaceBoard />) },
+      { path: 'warehouse', element: withSuspense(<WarehousePage />) },
+      { path: 'operations', element: withSuspense(<StationOpsPage />) },
+      { path: 'reconcile', element: withSuspense(<ReconcilePage />) },
       { path: 'geometry', element: withSuspense(<GeometryView />) },
       { path: '*', element: <Navigate to={ROUTES.arrays} replace /> },
     ],
