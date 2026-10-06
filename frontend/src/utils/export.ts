@@ -15,20 +15,35 @@ import type { ResponseVerdict } from '@/types/calibration';
 import { apertureKm, centroid, haversineKm, round, stationDistances } from '@/utils/geo';
 
 /** 备份集合键名 */
-export const BACKUP_KEYS = ['arrays', 'stations', 'instruments', 'calibrations', 'replaces'] as const;
+export const BACKUP_KEYS = [
+  'arrays',
+  'stations',
+  'instruments',
+  'calibrations',
+  'replaces',
+  'spareParts',
+  'outboundOrders',
+  'installs',
+  'removals',
+] as const;
 export type BackupKey = (typeof BACKUP_KEYS)[number];
 
 export type CountMap = Record<BackupKey, number>;
 
 /** 组装当前本地数据的完整快照 */
 export async function buildBackupPayload(): Promise<BackupPayload> {
-  const [arrays, stations, instruments, calibrations, replaces] = await Promise.all([
-    db.arrays.toArray(),
-    db.stations.toArray(),
-    db.instruments.toArray(),
-    db.calibrations.toArray(),
-    db.replaces.toArray(),
-  ]);
+  const [arrays, stations, instruments, calibrations, replaces, spareParts, outboundOrders, installs, removals] =
+    await Promise.all([
+      db.arrays.toArray(),
+      db.stations.toArray(),
+      db.instruments.toArray(),
+      db.calibrations.toArray(),
+      db.replaces.toArray(),
+      db.spareParts.toArray(),
+      db.outboundOrders.toArray(),
+      db.installs.toArray(),
+      db.removals.toArray(),
+    ]);
   return {
     app: 'gbseisarray',
     dbVersion: DB_VERSION,
@@ -38,6 +53,10 @@ export async function buildBackupPayload(): Promise<BackupPayload> {
     instruments,
     calibrations,
     replaces,
+    spareParts,
+    outboundOrders,
+    installs,
+    removals,
   };
 }
 
@@ -68,6 +87,10 @@ export function validateBackup(input: unknown): {
     instruments: obj.instruments ?? [],
     calibrations: obj.calibrations ?? [],
     replaces: obj.replaces ?? [],
+    spareParts: obj.spareParts ?? [],
+    outboundOrders: obj.outboundOrders ?? [],
+    installs: obj.installs ?? [],
+    removals: obj.removals ?? [],
   };
   return { ok: true, errors, payload };
 }
@@ -80,6 +103,10 @@ export function countPayload(payload: BackupPayload): CountMap {
     instruments: payload.instruments.length,
     calibrations: payload.calibrations.length,
     replaces: payload.replaces.length,
+    spareParts: payload.spareParts.length,
+    outboundOrders: payload.outboundOrders.length,
+    installs: payload.installs.length,
+    removals: payload.removals.length,
   };
 }
 
@@ -117,13 +144,27 @@ export async function importBackup(payload: BackupPayload, overwrite: boolean): 
   if (overwrite) await clearAllTables();
   await db.transaction(
     'rw',
-    [db.arrays, db.stations, db.instruments, db.calibrations, db.replaces],
+    [
+      db.arrays,
+      db.stations,
+      db.instruments,
+      db.calibrations,
+      db.replaces,
+      db.spareParts,
+      db.outboundOrders,
+      db.installs,
+      db.removals,
+    ],
     async () => {
       await db.arrays.bulkPut(payload.arrays);
       await db.stations.bulkPut(payload.stations);
       await db.instruments.bulkPut(payload.instruments);
       await db.calibrations.bulkPut(payload.calibrations);
       await db.replaces.bulkPut(payload.replaces);
+      await db.spareParts.bulkPut(payload.spareParts);
+      await db.outboundOrders.bulkPut(payload.outboundOrders);
+      await db.installs.bulkPut(payload.installs);
+      await db.removals.bulkPut(payload.removals);
     }
   );
   return countPayload(payload);
@@ -160,7 +201,23 @@ export function remapIds(payload: BackupPayload): BackupPayload {
     id: createId('rpl'),
     instrumentId: instrumentMap.get(row.instrumentId) ?? row.instrumentId,
   }));
-  return { ...payload, arrays, stations, instruments, calibrations, replaces };
+  // 装备库与台站运维两本账仅按序列号/单号关联，追加导入时保留原值即可，行主键重发
+  const spareParts = payload.spareParts.map((row) => ({ ...row, id: createId('prt') }));
+  const outboundOrders = payload.outboundOrders.map((row) => ({ ...row, id: createId('ob') }));
+  const installs = payload.installs.map((row) => ({ ...row, id: createId('ist') }));
+  const removals = payload.removals.map((row) => ({ ...row, id: createId('rmv') }));
+  return {
+    ...payload,
+    arrays,
+    stations,
+    instruments,
+    calibrations,
+    replaces,
+    spareParts,
+    outboundOrders,
+    installs,
+    removals,
+  };
 }
 
 /** 按台阵汇总的几何与标定结论 */

@@ -52,7 +52,17 @@ import {
 } from '@/utils/export';
 import { bearingDeg, round, stationDistances, toLocalPlane, planeViewBox } from '@/utils/geo';
 
-const EMPTY_COUNTS: CountMap = { arrays: 0, stations: 0, instruments: 0, calibrations: 0, replaces: 0 };
+const EMPTY_COUNTS: CountMap = {
+  arrays: 0,
+  stations: 0,
+  instruments: 0,
+  calibrations: 0,
+  replaces: 0,
+  spareParts: 0,
+  outboundOrders: 0,
+  installs: 0,
+  removals: 0,
+};
 
 export default function GeometryView() {
   const { message } = AntdApp.useApp();
@@ -95,7 +105,7 @@ export default function GeometryView() {
     [activeArrayId, stations]
   );
 
-  /** 台阵几何与标定结论汇总 */
+  /** 台阵几何与标定结论汇总（仅消费前五张表，新账本传空数组占位） */
   const summaries = useMemo(() => {
     const payload: BackupPayload = {
       app: 'gbseisarray',
@@ -106,6 +116,10 @@ export default function GeometryView() {
       instruments,
       calibrations,
       replaces,
+      spareParts: [],
+      outboundOrders: [],
+      installs: [],
+      removals: [],
     };
     return buildArraySummaries(payload);
   }, [arrays, calibrations, instruments, replaces, stations]);

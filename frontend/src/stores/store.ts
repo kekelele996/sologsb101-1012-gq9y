@@ -1,5 +1,7 @@
 /**
- * Redux store：汇总台阵 / 仪器 / 标定三个 slice。
+ * Redux store：汇总台阵 / 仪器 / 标定 / 装备库 / 台站运维五个 slice。
+ * 装备库（备件库存、出库单）与台站运维（安装位、拆卸、回收）是两本独立账，
+ * 仅通过序列号与出库单号对账，不共享可写状态。
  * 跨页状态全部放在 slice 中，组件只读 selector 并 dispatch 异步动作落 IndexedDB。
  */
 import { configureStore } from '@reduxjs/toolkit';
@@ -7,12 +9,16 @@ import { useDispatch, useSelector, type TypedUseSelectorHook } from 'react-redux
 import arrayReducer from '@/stores/arraySlice';
 import instrumentReducer from '@/stores/instrumentSlice';
 import calibrationReducer from '@/stores/calibrationSlice';
+import warehouseReducer from '@/stores/warehouseSlice';
+import opsReducer from '@/stores/opsSlice';
 
 export const store = configureStore({
   reducer: {
     array: arrayReducer,
     instrument: instrumentReducer,
     calibration: calibrationReducer,
+    warehouse: warehouseReducer,
+    ops: opsReducer,
   },
   middleware: (getDefaultMiddleware) =>
     getDefaultMiddleware({

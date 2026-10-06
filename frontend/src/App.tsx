@@ -12,6 +12,9 @@ import {
   GlobalOutlined,
   SwapOutlined,
   ThunderboltOutlined,
+  DatabaseOutlined,
+  ToolOutlined,
+  AuditOutlined,
 } from '@ant-design/icons';
 import { ROUTES } from '@/router';
 import { useAppDispatch, useAppSelector } from '@/stores/store';
@@ -30,6 +33,16 @@ import {
   selectReplaces,
   startCalibrationSubscription,
 } from '@/stores/calibrationSlice';
+import {
+  selectOutboundOrders,
+  selectSpareParts,
+  startWarehouseSubscription,
+} from '@/stores/warehouseSlice';
+import {
+  selectActiveInstalls,
+  selectPendingRecycle,
+  startOpsSubscription,
+} from '@/stores/opsSlice';
 import { DB_NAME, DB_VERSION, initDatabase } from '@/utils/db';
 
 const { Header, Sider, Content, Footer } = Layout;
@@ -38,6 +51,9 @@ const { Header, Sider, Content, Footer } = Layout;
 function buildSelectedKey(pathname: string, currentArrayId: string | null): string {
   if (pathname.startsWith('/calibrations')) return ROUTES.calibrations;
   if (pathname.startsWith('/replacements')) return ROUTES.replacements;
+  if (pathname.startsWith('/warehouse')) return ROUTES.warehouse;
+  if (pathname.startsWith('/ops')) return ROUTES.ops;
+  if (pathname.startsWith('/reconcile')) return ROUTES.reconcile;
   if (pathname.startsWith('/geometry')) return ROUTES.geometry;
   if (pathname.startsWith('/stations/') && currentArrayId) return ROUTES.stations(currentArrayId);
   return ROUTES.arrays;
@@ -54,6 +70,10 @@ export default function App() {
   const instruments = useAppSelector(selectInstruments);
   const calibrations = useAppSelector(selectCalibrations);
   const replaces = useAppSelector(selectReplaces);
+  const spareParts = useAppSelector(selectSpareParts);
+  const outboundOrders = useAppSelector(selectOutboundOrders);
+  const activeInstalls = useAppSelector(selectActiveInstalls);
+  const pendingRecycle = useAppSelector(selectPendingRecycle);
   const currentArrayId = useAppSelector(selectCurrentArrayId);
   const ready = useAppSelector((state) => state.array.ready);
 
@@ -67,6 +87,8 @@ export default function App() {
         startArraySubscription(dispatch);
         startInstrumentSubscription(dispatch);
         startCalibrationSubscription(dispatch);
+        startWarehouseSubscription(dispatch);
+        startOpsSubscription(dispatch);
       } catch (error) {
         if (cancelled) return;
         messageApi.error(
@@ -83,6 +105,8 @@ export default function App() {
   const selectedKey = buildSelectedKey(location.pathname, currentArrayId);
   const unqualified = calibrations.filter((row) => row.responseVerdict === '不合格').length;
   const pendingReplaces = replaces.filter((row) => row.state !== '已复核').length;
+  const lockedParts = spareParts.filter((row) => row.state === '已锁定').length;
+  const reconcileAlerts = pendingRecycle.length;
 
   return (
     <>
@@ -118,6 +142,9 @@ export default function App() {
               },
               { key: ROUTES.calibrations, icon: <DashboardOutlined />, label: '标定记录台' },
               { key: ROUTES.replacements, icon: <SwapOutlined />, label: '合格评定与更换' },
+              { key: ROUTES.warehouse, icon: <DatabaseOutlined />, label: '装备库（库存/出库）' },
+              { key: ROUTES.ops, icon: <ToolOutlined />, label: '台站运维（装拆/回收）' },
+              { key: ROUTES.reconcile, icon: <AuditOutlined />, label: '序列号对账' },
               { key: ROUTES.geometry, icon: <GlobalOutlined />, label: '台阵几何与备份' },
             ]}
           />
@@ -134,6 +161,14 @@ export default function App() {
               </span>
               <span>
                 <SwapOutlined /> 更换未闭环 {pendingReplaces}
+              </span>
+              <span>
+                <DatabaseOutlined /> 备件 {spareParts.length} · 出库单 {outboundOrders.length}
+                {lockedParts > 0 ? ` · 锁定 ${lockedParts}` : ''}
+              </span>
+              <span>
+                <ToolOutlined /> 在装 {activeInstalls.length} 台
+                {reconcileAlerts > 0 ? ` · 回收待办 ${reconcileAlerts}` : ''}
               </span>
             </Space>
           </div>

@@ -108,6 +108,20 @@ body::before {
   font-weight: 600;
 }
 
+/* 对账/超期风险行高亮 */
+.gb-row-danger > .ant-table-cell {
+  background: #fdecea !important;
+}
+
+.gb-row-warning > .ant-table-cell {
+  background: #fff7e6 !important;
+}
+
+.gb-row-muted > .ant-table-cell {
+  color: #9aa7b1;
+  background: #f6f8fa !important;
+}
+
 .gb-table-compact .ant-table-cell {
   padding: 8px 8px !important;
 }
